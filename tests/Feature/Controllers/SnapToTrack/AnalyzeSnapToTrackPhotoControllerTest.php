@@ -53,8 +53,6 @@ function fakeAuthenticatedAnalysis(): void
 }
 
 beforeEach(function (): void {
-    config()->set('plate.snap_to_track.activation_funnel', true);
-
     $this->user = User::factory()->create();
 
     RateLimiter::clear('snap-to-track-analyze:'.$this->user->id);
@@ -226,14 +224,4 @@ it('keeps the default burst cap for unrestricted entitlements', function (): voi
             'photo' => UploadedFile::fake()->image('meal-2.jpg'),
         ])
         ->assertSessionHasErrors('photo');
-});
-
-it('returns not found when the activation funnel is disabled', function (): void {
-    config()->set('plate.snap_to_track.activation_funnel', false);
-
-    actingAs($this->user)
-        ->post(route('snap-to-track.analyze'), [
-            'photo' => UploadedFile::fake()->image('meal.jpg'),
-        ])
-        ->assertNotFound();
 });

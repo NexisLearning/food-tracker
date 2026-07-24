@@ -13,8 +13,6 @@ covers(ShowSnapToTrackController::class);
 beforeEach(function (): void {
     $this->withoutVite();
 
-    config()->set('plate.snap_to_track.activation_funnel', true);
-
     $this->user = User::factory()->create();
 });
 
@@ -56,12 +54,4 @@ it('completes the auth funnel when a limit-recovery signup lands on the module',
         'name' => 'snap_to_track_auth_completed',
         'properties' => ['auth_path' => 'register'],
     ]);
-});
-
-it('returns not found when the activation funnel is disabled', function (): void {
-    config()->set('plate.snap_to_track.activation_funnel', false);
-
-    actingAs($this->user)
-        ->get(route('snap-to-track.index'))
-        ->assertNotFound();
 });
