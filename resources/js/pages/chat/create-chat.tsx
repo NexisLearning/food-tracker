@@ -317,8 +317,7 @@ export default function CreateChat() {
                                         size="icon"
                                         onClick={() =>
                                             router.visit(
-                                                ShowSnapToTrackController()
-                                                    .url,
+                                                ShowSnapToTrackController().url,
                                             )
                                         }
                                         aria-label={t(
