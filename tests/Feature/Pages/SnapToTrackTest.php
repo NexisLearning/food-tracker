@@ -46,6 +46,8 @@ function analyzePhotoForSnapToTrack(array $analysis, string $fileName = 'food.jp
 }
 
 beforeEach(function (): void {
+    config()->set('plate.snap_to_track.activation_funnel', false);
+
     RateLimiter::clear('snap-to-track:127.0.0.1');
     RateLimiter::clear('snap-to-track-upload:127.0.0.1');
     Cache::forget('snap-to-track-turnstile:'.sha1(ClientInterface::RESPONSE_DUMMY_TOKEN).':127.0.0.1');

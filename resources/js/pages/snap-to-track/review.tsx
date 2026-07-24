@@ -114,7 +114,9 @@ export default function SnapToTrackReview({
     ) => {
         setItems((current) =>
             current.map((item, itemIndex) =>
-                itemIndex === index ? { ...item, [field]: value } : item,
+                itemIndex === index
+                    ? { ...item, [field]: value, provenance: 'user' }
+                    : item,
             ),
         );
     };
@@ -312,6 +314,13 @@ export default function SnapToTrackReview({
                                                                 )
                                                             }
                                                             className="mt-1"
+                                                        />
+                                                        <InputError
+                                                            message={
+                                                                errors[
+                                                                    `items.${index}.${field}`
+                                                                ]
+                                                            }
                                                         />
                                                     </div>
                                                 ))}
