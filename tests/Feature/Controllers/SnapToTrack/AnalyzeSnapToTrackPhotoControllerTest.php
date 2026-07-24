@@ -125,8 +125,21 @@ it('throttles repeated analyses per user with a friendly retry message', functio
         ])
         ->assertRedirect(route('snap-to-track.index'))
         ->assertSessionHasErrors([
-            'photo' => __('common.snap_to_track.burst_limit', ['minutes' => 60]),
+            'photo' => "You've hit this hour's scan limit. You can scan again in about 60 minutes.",
         ]);
+});
+
+it('leaves other throttled routes returning a plain 429', function (): void {
+    $user = User::factory()->create();
+
+    foreach (range(1, 6) as $attempt) {
+        actingAs($user)->post(route('disclaimer.accept'), ['accepted' => '1']);
+    }
+
+    actingAs($user)
+        ->post(route('disclaimer.accept'), ['accepted' => '1'])
+        ->assertStatus(429)
+        ->assertSessionDoesntHaveErrors('photo');
 });
 
 it('blocks the scan before spending when the credit budget is exhausted', function (): void {
