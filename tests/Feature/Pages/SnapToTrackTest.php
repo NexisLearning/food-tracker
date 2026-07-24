@@ -313,8 +313,72 @@ it('blocks the analyze call once the per-IP rate limit is exhausted', function (
         ->set('photo', $file)
         ->set('turnstileToken', Turnstile::dummy())
         ->call('analyze')
-        ->assertSet('error', 'Too many requests. Please try again later.')
-        ->assertSet('result', null);
+        ->assertSet('error', null)
+        ->assertSet('result', null)
+        ->assertSee('on a roll')
+        ->assertDontSee('Too many requests. Please try again later.');
+});
+
+function exhaustSnapToTrackAnalysisLimit(): void
+{
+    foreach (range(1, 5) as $i) {
+        RateLimiter::hit('snap-to-track:127.0.0.1', 3600);
+    }
+}
+
+it('shows the guest limit recovery card with signup actions when the funnel is enabled', function (): void {
+    config()->set('plate.snap_to_track.activation_funnel', true);
+
+    exhaustSnapToTrackAnalysisLimit();
+
+    Livewire::test('pages::snap-to-track')
+        ->assertSee('on a roll')
+        ->assertSee('Keep analyzing — free')
+        ->assertSee('Log in');
+});
+
+it('shows the limit recovery copy without actions when the funnel is disabled', function (): void {
+    exhaustSnapToTrackAnalysisLimit();
+
+    Livewire::test('pages::snap-to-track')
+        ->assertSee('on a roll')
+        ->assertDontSee('Keep analyzing — free');
+});
+
+it('sends a limited guest into the app module through registration', function (): void {
+    config()->set('plate.snap_to_track.activation_funnel', true);
+
+    exhaustSnapToTrackAnalysisLimit();
+
+    Livewire::test('pages::snap-to-track')
+        ->call('continueInApp', 'register')
+        ->assertRedirect(route('register'));
+
+    expect(session('url.intended'))->toBe(route('snap-to-track.index', absolute: false))
+        ->and(session('snap_to_track.auth_path'))->toBe('register');
+});
+
+it('shows the app shortcut instead of signup actions to a limited member', function (): void {
+    config()->set('plate.snap_to_track.activation_funnel', true);
+
+    $this->actingAs(User::factory()->create());
+
+    exhaustSnapToTrackAnalysisLimit();
+
+    Livewire::test('pages::snap-to-track')
+        ->assertSee('Open Snap to Track')
+        ->assertSee('pick up right where you left off')
+        ->assertDontSee('Keep analyzing — free');
+});
+
+it('rejects continue in app when the funnel is disabled', function (): void {
+    exhaustSnapToTrackAnalysisLimit();
+
+    Livewire::test('pages::snap-to-track')
+        ->call('continueInApp', 'register')
+        ->assertStatus(404);
+
+    expect(session('url.intended'))->toBeNull();
 });
 
 it('shows the carb boundary notice with analysis results', function (): void {

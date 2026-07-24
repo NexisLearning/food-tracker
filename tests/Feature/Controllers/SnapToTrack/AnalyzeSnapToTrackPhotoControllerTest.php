@@ -3,7 +3,11 @@
 declare(strict_types=1);
 
 use App\Ai\Agents\FoodPhotoAnalyzerAgent;
+use App\Contracts\Billing\ResolvesUserTier;
+use App\Data\Billing\TierEntitlement;
+use App\Enums\SubscriptionTier;
 use App\Http\Controllers\SnapToTrack\AnalyzeSnapToTrackPhotoController;
+use App\Models\AiUsage;
 use App\Models\AnalysisDraft;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
@@ -12,6 +16,27 @@ use Illuminate\Support\Facades\RateLimiter;
 use function Pest\Laravel\actingAs;
 
 covers(AnalyzeSnapToTrackPhotoController::class);
+
+function stubTierForSnapToTrack(SubscriptionTier $tier): void
+{
+    app()->instance(ResolvesUserTier::class, new class($tier) implements ResolvesUserTier
+    {
+        public function __construct(private readonly SubscriptionTier $tier) {}
+
+        public function resolve(User $user): TierEntitlement
+        {
+            return new TierEntitlement(tier: $this->tier);
+        }
+    });
+}
+
+function zeroFreeCreditBudget(): void
+{
+    config()->set('plate.tier_limits.free', [
+        'rolling' => ['limit' => 0.0, 'period_hours' => 24],
+        'weekly' => ['limit' => 0.0, 'period_days' => 7],
+    ]);
+}
 
 function fakeAuthenticatedAnalysis(): void
 {
@@ -86,7 +111,7 @@ it('validates the uploaded photo', function (array $payload, string $errorKey): 
     'oversized image' => [fn (): array => ['photo' => UploadedFile::fake()->image('meal.jpg')->size(11000)], 'photo'],
 ]);
 
-it('throttles repeated analyses per user', function (): void {
+it('throttles repeated analyses per user with a friendly retry message', function (): void {
     fakeAuthenticatedAnalysis();
 
     foreach (range(1, 5) as $attempt) {
@@ -95,9 +120,112 @@ it('throttles repeated analyses per user', function (): void {
         ])->assertRedirect();
     }
 
+    actingAs($this->user)
+        ->from(route('snap-to-track.index'))
+        ->post(route('snap-to-track.analyze'), [
+            'photo' => UploadedFile::fake()->image('meal-6.jpg'),
+        ])
+        ->assertRedirect(route('snap-to-track.index'))
+        ->assertSessionHasErrors([
+            'photo' => __('common.snap_to_track.burst_limit', ['minutes' => 60]),
+        ]);
+});
+
+it('blocks the scan before spending when the credit budget is exhausted', function (): void {
+    stubTierForSnapToTrack(SubscriptionTier::Free);
+    zeroFreeCreditBudget();
+
+    FoodPhotoAnalyzerAgent::fake(function (): void {
+        throw new Exception('Analyzer must not run when the credit budget is exhausted');
+    });
+
+    $response = actingAs($this->user)->post(route('snap-to-track.analyze'), [
+        'photo' => UploadedFile::fake()->image('meal.jpg'),
+    ]);
+
+    $response->assertRedirect(route('snap-to-track.index'))
+        ->assertSessionHas('snap_to_track_credit_limit')
+        ->assertInertiaFlash('analytics', [
+            'name' => 'snap_to_track_limit_reached',
+            'properties' => [
+                'source' => 'authenticated_snap_to_track',
+                'gate' => 'credits',
+                'tier' => 'free',
+            ],
+        ]);
+
+    $payload = session('snap_to_track_credit_limit');
+
+    expect($payload['tier'])->toBe('free')
+        ->and($payload['limit_credits'])->toBe(0)
+        ->and($payload['resets_at'])->not->toBeEmpty()
+        ->and(AnalysisDraft::query()->count())->toBe(0)
+        ->and(AiUsage::query()->count())->toBe(0);
+});
+
+it('scans past an exhausted budget when premium enforcement is inactive', function (): void {
+    zeroFreeCreditBudget();
+    fakeAuthenticatedAnalysis();
+
     actingAs($this->user)->post(route('snap-to-track.analyze'), [
-        'photo' => UploadedFile::fake()->image('meal-6.jpg'),
-    ])->assertStatus(429);
+        'photo' => UploadedFile::fake()->image('meal.jpg'),
+    ])->assertRedirectContains('/app/snap-to-track/review/');
+
+    expect(AnalysisDraft::query()->count())->toBe(1);
+});
+
+it('applies tier-aware burst caps to scanning', function (): void {
+    config()->set('plate.snap_to_track.burst_caps.free', 1);
+    config()->set('plate.snap_to_track.burst_caps.basic', 2);
+
+    fakeAuthenticatedAnalysis();
+    stubTierForSnapToTrack(SubscriptionTier::Free);
+
+    actingAs($this->user)->post(route('snap-to-track.analyze'), [
+        'photo' => UploadedFile::fake()->image('meal-1.jpg'),
+    ])->assertRedirectContains('/app/snap-to-track/review/');
+
+    actingAs($this->user)
+        ->from(route('snap-to-track.index'))
+        ->post(route('snap-to-track.analyze'), [
+            'photo' => UploadedFile::fake()->image('meal-2.jpg'),
+        ])
+        ->assertRedirect(route('snap-to-track.index'))
+        ->assertSessionHasErrors('photo');
+
+    $supporter = User::factory()->create();
+    stubTierForSnapToTrack(SubscriptionTier::Basic);
+
+    foreach (range(1, 2) as $attempt) {
+        actingAs($supporter)->post(route('snap-to-track.analyze'), [
+            'photo' => UploadedFile::fake()->image("supporter-{$attempt}.jpg"),
+        ])->assertRedirectContains('/app/snap-to-track/review/');
+    }
+
+    actingAs($supporter)
+        ->from(route('snap-to-track.index'))
+        ->post(route('snap-to-track.analyze'), [
+            'photo' => UploadedFile::fake()->image('supporter-3.jpg'),
+        ])
+        ->assertSessionHasErrors('photo');
+});
+
+it('keeps the default burst cap for unrestricted entitlements', function (): void {
+    config()->set('plate.snap_to_track.burst_caps.default', 1);
+    config()->set('plate.snap_to_track.burst_caps.free', 5);
+
+    fakeAuthenticatedAnalysis();
+
+    actingAs($this->user)->post(route('snap-to-track.analyze'), [
+        'photo' => UploadedFile::fake()->image('meal-1.jpg'),
+    ])->assertRedirectContains('/app/snap-to-track/review/');
+
+    actingAs($this->user)
+        ->from(route('snap-to-track.index'))
+        ->post(route('snap-to-track.analyze'), [
+            'photo' => UploadedFile::fake()->image('meal-2.jpg'),
+        ])
+        ->assertSessionHasErrors('photo');
 });
 
 it('returns not found when the activation funnel is disabled', function (): void {
