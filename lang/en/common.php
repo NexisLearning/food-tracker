@@ -450,6 +450,10 @@ return [
     ],
     'snap_to_track' => [
         'title' => 'Snap to Track',
+        'launcher' => [
+            'title' => 'Snap to Track',
+            'subtitle' => 'Photo in, logged meal out — no typing.',
+        ],
         'review' => [
             'heading' => 'Review your meal',
             'description' => 'Check what the AI detected, fix anything that looks off, then log it to your health history.',

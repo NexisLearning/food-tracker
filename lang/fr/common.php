@@ -451,6 +451,10 @@ return [
     ],
     'snap_to_track' => [
         'title' => 'Snap to Track',
+        'launcher' => [
+            'title' => 'Snap to Track',
+            'subtitle' => 'Une photo, un repas enregistré — sans rien taper.',
+        ],
         'review' => [
             'heading' => 'Vérifiez votre repas',
             'description' => "Vérifiez ce que l'IA a détecté, corrigez ce qui semble inexact, puis enregistrez-le dans votre historique de santé.",

@@ -80,3 +80,10 @@ Snap to Track (`/tools/snap-to-track`) is Plate's most-visited public page, but 
 3. Manual QA on Herd (flag on in `.env`): analyze → Save free → register (email verify same browser) → review lands with items → edit → save → entry appears in `/health-entries` with metadata; repeat for login, Google-new (disclaimer), Google-existing, already-authenticated; verify duplicate save via back-button creates no second entry; verify Umami payloads (network tab) contain only enums/counts/bands.
 4. Safety checks before PR: `rg "acara-app/acara-core|Acara\\\\AcaraCore" app config routes tests resources composer.json` clean; flag-off run shows the page byte-identical to today.
 5. Rollout: merge with `PLATE_SNAP_TO_TRACK_ACTIVATION_FUNNEL=false`; enable on staging first; after enabling in prod, watch completed analyses (>-10%), draft-restore success ≥95%, restore→save ≥70%, and expiry frequency before touching the 60-min TTL.
+
+## Entry points (added 2026-07-24)
+
+Beyond the sidebar item, two more flag-gated entry points link to `snap-to-track.index` via `ShowSnapToTrackController().url`, both conditional on the `snapToTrackActivation` shared prop:
+
+- **Dashboard** (`resources/js/pages/dashboard.tsx`): an emerald launcher pill directly under the chat composer (gradient `ScanLine` tile, `snap_to_track.launcher.*` copy, chevron affordance). One pill, not a card grid, to preserve the launcher page's single-purpose composition.
+- **Chat conversation** (`resources/js/pages/chat/create-chat.tsx`): a `ScanLine` icon button in the floating header `ButtonGroup` beside new-chat/keep/pin, tooltip labelled with `sidebar.nav.snap_to_track`. The composer paperclip (in-chat AnalyzePhoto) is intentionally left untouched to avoid forking the photo mental model.
