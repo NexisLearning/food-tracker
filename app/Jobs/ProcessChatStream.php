@@ -139,18 +139,16 @@ final class ProcessChatStream implements ShouldQueue
         $aggregator = resolve(StreamAggregator::class);
         $user = User::query()->find($this->userId);
 
-        if (! $user instanceof User) {
-            return;
+        if ($user instanceof User) {
+            resolve(CompletePendingChatStreamTurn::class)->handle(
+                conversationId: $this->conversationId,
+                user: $user,
+                userMessageId: $this->userMessageId,
+                assistantMessageId: $this->assistantMessageId,
+                result: $aggregator->aggregateStoredEvents($events->eventsAfter($this->conversationId, -1)),
+                status: History::STREAM_STATUS_FAILED,
+            );
         }
-
-        resolve(CompletePendingChatStreamTurn::class)->handle(
-            conversationId: $this->conversationId,
-            user: $user,
-            userMessageId: $this->userMessageId,
-            assistantMessageId: $this->assistantMessageId,
-            result: $aggregator->aggregateStoredEvents($events->eventsAfter($this->conversationId, -1)),
-            status: History::STREAM_STATUS_FAILED,
-        );
 
         $events->markComplete($this->conversationId);
 

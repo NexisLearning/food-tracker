@@ -15,6 +15,7 @@ use App\Models\User;
 use App\Services\Ai\PlateConversationStore;
 use App\Services\StreamAggregator;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Queue;
 use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Exceptions\ApprovalMismatchException;
@@ -191,4 +192,45 @@ it('marks persistence app-managed for streamed turns and hands it back for sync 
     $prepare->invoke($runner, $request, $user, false);
 
     expect(PlateConversationStore::appManaged())->toBeFalse();
+});
+
+it('subscribes the browser to the pause event the server broadcasts', function (): void {
+    $payload = resolve(StreamAggregator::class)->normalizeEvent(new ToolApprovalRequest(
+        id: 'evt-1',
+        pendingApprovals: new Collection([new PendingApproval('call_abc', 'log_health_entry', [], null)]),
+        timestamp: 1,
+    ));
+
+    $subscribed = File::get(resource_path('js/hooks/chat/use-stream-channel.ts'));
+
+    expect($subscribed)->toContain("'.".$payload['type']."'");
+});
+
+it('drops a pause from a turn that never finished, since it cannot be resumed', function (): void {
+    $user = User::factory()->create();
+    $conversation = Conversation::factory()->forUser($user)->create();
+
+    $assistant = History::factory()->forConversation($conversation)->create([
+        'role' => MessageRole::Assistant,
+        'meta' => History::streamMeta('stream-1', History::STREAM_STATUS_PENDING),
+    ]);
+
+    resolve(CompletePendingChatStreamTurn::class)->handle(
+        conversationId: $conversation->id,
+        user: $user,
+        userMessageId: null,
+        assistantMessageId: $assistant->id,
+        result: new ChatStreamResult(
+            text: 'Confirm below.',
+            toolCalls: [['id' => 'call_abc', 'name' => 'log_health_entry', 'arguments' => []]],
+            pendingApprovals: ['call_abc' => 'Glucose 140 mg/dL, fasting'],
+        ),
+        status: History::STREAM_STATUS_FAILED,
+    );
+
+    $assistant = $assistant->fresh();
+
+    expect($assistant->approval_state)->toBeNull()
+        ->and($assistant->requestedApprovals())->toBe([])
+        ->and($assistant->hasPendingApprovals())->toBeFalse();
 });

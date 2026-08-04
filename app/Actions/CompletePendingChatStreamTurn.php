@@ -29,6 +29,10 @@ final readonly class CompletePendingChatStreamTurn
         array $providerContentBlocks = [],
         ?string $provider = null,
     ): void {
+        if ($status !== History::STREAM_STATUS_COMPLETED) {
+            $result = $result->withoutPendingApprovals();
+        }
+
         DB::transaction(function () use ($conversationId, $user, $userMessageId, $assistantMessageId, $result, $status, $providerContentBlocks, $provider): void {
             $now = now();
 

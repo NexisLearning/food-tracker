@@ -41,4 +41,17 @@ final readonly class ChatStreamResult
     {
         return $this->pendingApprovals !== [];
     }
+
+    public function withoutPendingApprovals(): self
+    {
+        return new self(
+            text: $this->text,
+            toolCalls: $this->toolCalls,
+            toolResults: $this->toolResults,
+            providerTools: $this->providerTools,
+            citations: $this->citations,
+            errors: $this->errors,
+            usage: $this->usage,
+        );
+    }
 }
