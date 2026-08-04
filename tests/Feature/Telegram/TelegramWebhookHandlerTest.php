@@ -4,14 +4,13 @@ declare(strict_types=1);
 
 use App\Contracts\DownloadsTelegramPhoto;
 use App\Contracts\ProcessesAdvisorMessage;
-use App\Enums\AgentApprovalStatus;
 use App\Enums\ChatPlatform;
 use App\Enums\Sex;
 use App\Enums\SubscriptionTier;
 use App\Exceptions\Billing\UsageLimitExceededException;
 use App\Exceptions\TelegramUserException;
-use App\Jobs\ExecuteApprovalJob;
-use App\Models\AgentApproval;
+use App\Models\Conversation;
+use App\Models\History;
 use App\Models\User;
 use App\Models\UserChatPlatformLink;
 use App\Models\UserProfile;
@@ -20,9 +19,9 @@ use App\Utilities\StaticUrl;
 use DefStudio\Telegraph\Facades\Telegraph;
 use DefStudio\Telegraph\Models\TelegraphBot;
 use DefStudio\Telegraph\Models\TelegraphChat;
-use Illuminate\Support\Facades\Context;
-use Illuminate\Support\Facades\Queue;
 use Illuminate\Testing\TestResponse;
+use Laravel\Ai\Approvals\Decisions;
+use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Files\Base64Image;
 use Tests\Fixtures\TelegramWebhookPayloads;
 
@@ -66,12 +65,57 @@ function linkedChatFor(mixed $test, User $user, array $overrides = []): UserChat
         ], $overrides));
 }
 
-function sendCallback(mixed $test, string $action, string $approvalId): TestResponse
+function sendCallback(mixed $test, string $action, int $approvalIndex = 0): TestResponse
 {
     return $test->postJson(
         route('telegraph.webhook', ['token' => $test->bot->token]),
-        TelegramWebhookPayloads::callbackQuery($action, $approvalId, (string) $test->telegraphChat->chat_id),
+        TelegramWebhookPayloads::callbackQuery($action, $approvalIndex, (string) $test->telegraphChat->chat_id),
     );
+}
+
+function telegramAdvisor(callable $handle, ?callable $resume = null): ProcessesAdvisorMessage
+{
+    return new class($handle, $resume) implements ProcessesAdvisorMessage
+    {
+        /** @var callable */
+        private $handle;
+
+        /** @var ?callable */
+        private $resumeHandler;
+
+        public function __construct(callable $handle, ?callable $resume)
+        {
+            $this->handle = $handle;
+            $this->resumeHandler = $resume;
+        }
+
+        public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
+        {
+            return ($this->handle)($user, $message, $conversationId, $attachments);
+        }
+
+        public function resume(User $user, string $conversationId, Decisions $decisions): array
+        {
+            return ($this->resumeHandler)($user, $conversationId, $decisions);
+        }
+
+        public function resetConversation(User $user): string
+        {
+            return 'reset';
+        }
+    };
+}
+
+function pausedTurnFor(User $user, string $conversationId, string $reason = 'Glucose 140 mg/dL (fasting)'): Conversation
+{
+    $conversation = Conversation::factory()->forUser($user)->create(['id' => $conversationId]);
+
+    History::factory()
+        ->forConversation($conversation)
+        ->awaitingApproval(['call_abc' => $reason])
+        ->create(['tool_calls' => [['id' => 'call_abc', 'name' => 'log_health_entry', 'arguments' => ['log_type' => 'glucose']]]]);
+
+    return $conversation;
 }
 
 describe('/start command', function (): void {
@@ -239,7 +283,12 @@ describe('/new command', function (): void {
         {
             public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
             {
-                return ['response' => 'Test', 'conversation_id' => 'conv-123'];
+                return ['response' => 'Test', 'conversation_id' => 'conv-123', 'pending_approvals' => []];
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -265,7 +314,12 @@ describe('/reset command', function (): void {
         {
             public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
             {
-                return ['response' => 'Test', 'conversation_id' => 'conv-123'];
+                return ['response' => 'Test', 'conversation_id' => 'conv-123', 'pending_approvals' => []];
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -296,7 +350,12 @@ describe('chat message handling', function (): void {
         {
             public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
             {
-                return ['response' => 'Here are some breakfast suggestions...', 'conversation_id' => 'existing-conv'];
+                return ['response' => 'Here are some breakfast suggestions...', 'conversation_id' => 'existing-conv', 'pending_approvals' => []];
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -319,7 +378,12 @@ describe('chat message handling', function (): void {
         {
             public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
             {
-                return ['response' => 'Welcome!', 'conversation_id' => 'first-conv-id'];
+                return ['response' => 'Welcome!', 'conversation_id' => 'first-conv-id', 'pending_approvals' => []];
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -342,7 +406,12 @@ describe('chat message handling', function (): void {
         {
             public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
             {
-                return ['response' => 'Response', 'conversation_id' => 'existing-conv'];
+                return ['response' => 'Response', 'conversation_id' => 'existing-conv', 'pending_approvals' => []];
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -368,6 +437,11 @@ describe('chat message handling', function (): void {
                 throw new Exception('AI service unavailable');
             }
 
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
+            }
+
             public function resetConversation(User $user): string
             {
                 return 'new-conv';
@@ -389,6 +463,11 @@ describe('chat message handling', function (): void {
             public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
             {
                 throw new TelegramUserException('User error occurred');
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -420,6 +499,11 @@ describe('chat message handling', function (): void {
                 );
             }
 
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
+            }
+
             public function resetConversation(User $user): string
             {
                 return 'new-conv';
@@ -449,7 +533,12 @@ describe('photo message handling', function (): void {
             {
                 $this->calls[] = ['message' => $message, 'attachmentCount' => count($attachments)];
 
-                return ['response' => 'I analyzed your food photo!', 'conversation_id' => 'existing-conv'];
+                return ['response' => 'I analyzed your food photo!', 'conversation_id' => 'existing-conv', 'pending_approvals' => []];
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -484,7 +573,12 @@ describe('photo message handling', function (): void {
             {
                 $this->calls[] = ['message' => $message, 'attachmentCount' => count($attachments)];
 
-                return ['response' => 'Analyzed!', 'conversation_id' => 'existing-conv'];
+                return ['response' => 'Analyzed!', 'conversation_id' => 'existing-conv', 'pending_approvals' => []];
+            }
+
+            public function resume(User $user, string $conversationId, Decisions $decisions): array
+            {
+                return ['response' => '', 'conversation_id' => $conversationId, 'pending_approvals' => []];
             }
 
             public function resetConversation(User $user): string
@@ -530,32 +624,22 @@ describe('photo message handling', function (): void {
 });
 
 describe('health-log approval card', function (): void {
-    it('sends an approval card with the summary and a not-saved-yet status when the agent proposes a log', function (): void {
+    it('sends an approval card with the summary and a not-saved-yet status when the agent pauses a log', function (): void {
         $user = User::factory()->create();
         linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
 
-        $approval = AgentApproval::factory()->telegram()->create([
-            'user_id' => $user->id,
-            'summary' => 'Glucose 140 mg/dL (fasting)',
-        ]);
-
-        $mock = new readonly class($approval->id) implements ProcessesAdvisorMessage
-        {
-            public function __construct(private string $approvalId) {}
-
-            public function handle(User $user, string $message, ?string $conversationId = null, array $attachments = []): array
-            {
-                Context::push('chat.created_approvals', $this->approvalId);
-
-                return ['response' => 'Here is what I will log:', 'conversation_id' => 'conv-x'];
-            }
-
-            public function resetConversation(User $user): string
-            {
-                return 'x';
-            }
-        };
-        app()->instance(ProcessesAdvisorMessage::class, $mock);
+        app()->instance(ProcessesAdvisorMessage::class, telegramAdvisor(
+            fn (): array => [
+                'response' => 'Here is what I will log:',
+                'conversation_id' => 'conv-x',
+                'pending_approvals' => [new PendingApproval(
+                    id: 'call_abc',
+                    tool: 'log_health_entry',
+                    arguments: ['log_type' => 'glucose'],
+                    reason: 'Glucose 140 mg/dL (fasting)',
+                )],
+            ],
+        ));
 
         sendWebhook($this, 'log my glucose 140 fasting');
 
@@ -566,64 +650,72 @@ describe('health-log approval card', function (): void {
 });
 
 describe('approval callbacks', function (): void {
-    it('approves the entry, queues execution, and shows a saving status', function (): void {
-        Queue::fake();
-
+    it('approves the paused call, resumes the turn, and shows the saved status', function (): void {
         $user = User::factory()->create();
-        linkedChatFor($this, $user);
-        $approval = AgentApproval::factory()->telegram()->create(['user_id' => $user->id]);
+        linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
+        pausedTurnFor($user, 'conv-x');
 
-        sendCallback($this, 'approve', $approval->id);
+        $resumed = null;
+        app()->instance(ProcessesAdvisorMessage::class, telegramAdvisor(
+            fn (): array => ['response' => '', 'conversation_id' => 'conv-x', 'pending_approvals' => []],
+            function (User $u, string $conversationId, Decisions $decisions) use (&$resumed): array {
+                $resumed = $decisions;
 
-        expect($approval->fresh()->status)->toBe(AgentApprovalStatus::Approved);
-        Queue::assertPushed(ExecuteApprovalJob::class, 1);
-        Telegraph::assertSentData('editMessageText', ['text' => 'Saving your entry'], false);
+                return ['response' => 'Logged 140 mg/dL.', 'conversation_id' => 'conv-x', 'pending_approvals' => []];
+            },
+        ));
+
+        sendCallback($this, 'approve');
+
+        expect($resumed?->get('call_abc')?->isApproved())->toBeTrue();
+        Telegraph::assertSentData('editMessageText', ['text' => 'Saved'], false);
+        Telegraph::assertSent('Logged 140 mg/dL.', false);
     });
 
-    it('rejects the entry without queuing execution', function (): void {
-        Queue::fake();
-
+    it('rejects the paused call and tells the model nothing was saved', function (): void {
         $user = User::factory()->create();
-        linkedChatFor($this, $user);
-        $approval = AgentApproval::factory()->telegram()->create(['user_id' => $user->id]);
+        linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
+        pausedTurnFor($user, 'conv-x');
 
-        sendCallback($this, 'reject', $approval->id);
+        $resumed = null;
+        app()->instance(ProcessesAdvisorMessage::class, telegramAdvisor(
+            fn (): array => ['response' => '', 'conversation_id' => 'conv-x', 'pending_approvals' => []],
+            function (User $u, string $conversationId, Decisions $decisions) use (&$resumed): array {
+                $resumed = $decisions;
 
-        expect($approval->fresh()->status)->toBe(AgentApprovalStatus::Rejected);
-        Queue::assertNotPushed(ExecuteApprovalJob::class);
-        Telegraph::assertSentData('editMessageText', ['text' => 'Not saved'], false);
+                return ['response' => 'Understood, nothing saved.', 'conversation_id' => 'conv-x', 'pending_approvals' => []];
+            },
+        ));
+
+        sendCallback($this, 'reject');
+
+        expect($resumed?->get('call_abc')?->isRejected())->toBeTrue();
+        Telegraph::assertSentData('editMessageText', ['text' => 'Dismissed'], false);
     });
 
-    it('refuses to act on an approval owned by another user', function (): void {
-        Queue::fake();
-
+    it('replies neutrally when the conversation has nothing awaiting a decision', function (): void {
         $user = User::factory()->create();
-        $other = User::factory()->create();
-        linkedChatFor($this, $user);
-        $approval = AgentApproval::factory()->telegram()->create(['user_id' => $other->id]);
+        linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
+        Conversation::factory()->forUser($user)->create(['id' => 'conv-x']);
 
-        sendCallback($this, 'approve', $approval->id);
+        sendCallback($this, 'approve');
 
-        expect($approval->fresh()->status)->toBe(AgentApprovalStatus::Pending);
-        Queue::assertNotPushed(ExecuteApprovalJob::class);
         Telegraph::assertSentData('answerCallbackQuery', ['text' => 'no longer available'], false);
     });
 
-    it('replies neutrally for an unknown approval id', function (): void {
+    it('replies neutrally for an out-of-range approval index', function (): void {
         $user = User::factory()->create();
-        linkedChatFor($this, $user);
+        linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
+        pausedTurnFor($user, 'conv-x');
 
-        sendCallback($this, 'approve', '00000000-0000-0000-0000-000000000000');
+        sendCallback($this, 'approve', 5);
 
         Telegraph::assertSentData('answerCallbackQuery', ['text' => 'no longer available'], false);
     });
 
     it('asks an unlinked user to link their account first', function (): void {
-        $approval = AgentApproval::factory()->telegram()->create();
-
-        sendCallback($this, 'approve', $approval->id);
+        sendCallback($this, 'approve');
 
         Telegraph::assertSentData('answerCallbackQuery', ['text' => 'Please link your account'], false);
-        expect($approval->fresh()->status)->toBe(AgentApprovalStatus::Pending);
     });
 });

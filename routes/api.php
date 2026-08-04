@@ -58,14 +58,8 @@ Route::prefix('v2/chat')
         Route::patch('conversations/{conversation}/unkeep', [ApiV2\ChatController::class, 'unkeep'])
             ->name('api.v2.chat.unkeep');
 
-        Route::get('conversations/{conversation}/approvals/{approval}', [ApiV2\ApprovalController::class, 'show'])
-            ->name('api.v2.chat.approvals.show');
-
-        Route::post('conversations/{conversation}/approvals/{approval}/approve', [ApiV2\ApprovalController::class, 'approve'])
-            ->name('api.v2.chat.approvals.approve');
-
-        Route::post('conversations/{conversation}/approvals/{approval}/reject', [ApiV2\ApprovalController::class, 'reject'])
-            ->name('api.v2.chat.approvals.reject');
+        Route::post('conversations/{conversation}/approvals', ApiV2\ApprovalDecisionController::class)
+            ->name('api.v2.chat.approvals.decide');
     });
 
 Route::prefix('v2/auth')->group(function (): void {

@@ -1,24 +1,21 @@
-import { isApprovalCardData } from '@/components/chat/approval-part';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import { approve, reject } from '@/routes/approvals';
-import type {
-    ApprovalCardData,
-    ApprovalStatus,
-    ChatApprovalsPageProps,
-} from '@/types/chat';
-import { useHttp, usePage, usePoll } from '@inertiajs/react';
+import { decide } from '@/routes/approvals';
+import type { ApprovalCardData, ApprovalStatus } from '@/types/chat';
+import { useHttp } from '@inertiajs/react';
 import { AlertCircle, Check, Clock, Loader2, X } from 'lucide-react';
-import { type ComponentType, useEffect, useState } from 'react';
+import { type ComponentType, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface ApprovalCardProps {
     conversationId: string;
-    approvalId: string;
-    card: ApprovalCardData;
+    approval: ApprovalCardData;
 }
 
-const POLL_INTERVAL_MS = 1500;
+interface ApprovalDecisionsForm {
+    decisions: Record<string, { action: 'approve' | 'reject' }>;
+}
 
 interface StatusPresentation {
     badgeLabel: string;
@@ -26,18 +23,7 @@ interface StatusPresentation {
     footerLabel: string;
     footerClassName: string;
     FooterIcon: ComponentType<{ className?: string }>;
-    footerSpin?: boolean;
 }
-
-const SAVING_PRESENTATION = {
-    badgeLabel: 'Saving…',
-    badgeClassName:
-        'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-    footerLabel: 'Saving…',
-    footerClassName: 'text-amber-600 dark:text-amber-400',
-    FooterIcon: Loader2,
-    footerSpin: true,
-} satisfies StatusPresentation;
 
 const STATUS_PRESENTATION: Record<ApprovalStatus, StatusPresentation> = {
     pending: {
@@ -47,23 +33,13 @@ const STATUS_PRESENTATION: Record<ApprovalStatus, StatusPresentation> = {
         footerClassName: 'text-muted-foreground',
         FooterIcon: Clock,
     },
-    approved: SAVING_PRESENTATION,
-    executing: SAVING_PRESENTATION,
-    executed: {
-        badgeLabel: 'Saved',
+    approved: {
+        badgeLabel: 'Approved',
         badgeClassName:
             'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
         footerLabel: 'Saved successfully.',
         footerClassName: 'text-emerald-600 dark:text-emerald-400',
         FooterIcon: Check,
-    },
-    failed: {
-        badgeLabel: 'Failed',
-        badgeClassName:
-            'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
-        footerLabel: 'Could not be saved.',
-        footerClassName: 'text-red-600 dark:text-red-400',
-        FooterIcon: AlertCircle,
     },
     rejected: {
         badgeLabel: 'Dismissed',
@@ -72,77 +48,47 @@ const STATUS_PRESENTATION: Record<ApprovalStatus, StatusPresentation> = {
         footerClassName: 'text-muted-foreground',
         FooterIcon: X,
     },
-    expired: {
-        badgeLabel: 'Expired',
-        badgeClassName: 'bg-muted text-muted-foreground',
-        footerLabel: 'This request expired.',
-        footerClassName: 'text-muted-foreground',
-        FooterIcon: Clock,
-    },
 };
 
-export function ApprovalCard({
-    conversationId,
-    approvalId,
-    card,
-}: ApprovalCardProps) {
-    const action = useHttp<Record<string, never>, ApprovalCardData>({});
-    const [state, setState] = useState<ApprovalCardData>(card);
+function summaryOf(approval: ApprovalCardData): string {
+    if (approval.reason) {
+        return approval.reason;
+    }
 
-    const live =
-        usePage<ChatApprovalsPageProps>().props.approvals?.[approvalId];
+    const summary = approval.arguments.summary;
 
-    useEffect(() => {
-        if (live) {
-            setState(live);
-        }
-    }, [live]);
+    return typeof summary === 'string' ? summary : approval.tool;
+}
 
-    const inFlight =
-        state.status === 'approved' || state.status === 'executing';
+export function ApprovalCard({ conversationId, approval }: ApprovalCardProps) {
+    const { t } = useTranslation();
+    const action = useHttp<ApprovalDecisionsForm, unknown>({ decisions: {} });
+    const [status, setStatus] = useState<ApprovalStatus>(approval.status);
+    const [error, setError] = useState<string | null>(null);
 
-    const { start, stop } = usePoll(
-        POLL_INTERVAL_MS,
-        { only: ['approvals'] },
-        { autoStart: false },
-    );
+    const isFoodEntry = approval.arguments.log_type === 'food';
 
-    useEffect(() => {
-        if (!inFlight) {
+    async function submit(intent: ApprovalStatus) {
+        if (action.processing || status !== 'pending') {
             return;
         }
 
-        start();
+        setError(null);
 
-        return stop;
-    }, [inFlight]);
-
-    async function act(intent: 'approve' | 'reject') {
-        if (action.processing) {
-            return;
-        }
-
-        const url =
-            intent === 'approve'
-                ? approve.url({
-                      conversation: conversationId,
-                      approval: approvalId,
-                  })
-                : reject.url({
-                      conversation: conversationId,
-                      approval: approvalId,
-                  });
+        action.transform(() => ({
+            decisions: {
+                [approval.toolCallId]: {
+                    action: intent === 'approved' ? 'approve' : 'reject',
+                },
+            },
+        }));
 
         try {
-            const fresh = await action.post(url);
-            if (isApprovalCardData(fresh)) {
-                setState(fresh);
-            }
+            await action.post(decide.url({ conversation: conversationId }));
+
+            setStatus(intent);
         } catch {
-            setState((previous) => ({
-                ...previous,
-                error: 'Something went wrong. Please try again.',
-            }));
+            setError('Something went wrong. Please try again.');
         }
     }
 
@@ -150,30 +96,32 @@ export function ApprovalCard({
         <Card className="my-2 gap-0 overflow-hidden border border-border/60 bg-card/80 backdrop-blur-sm">
             <CardContent className="px-4 py-3">
                 <div className="flex items-start justify-between gap-3">
-                    <p className="text-sm text-foreground">{state.summary}</p>
-                    <StatusBadge status={state.status} />
+                    <p className="text-sm text-foreground">
+                        {summaryOf(approval)}
+                    </p>
+                    <StatusBadge status={status} />
                 </div>
-                {state.notice && (
+                {isFoodEntry && (
                     <p className="mt-2 text-xs text-muted-foreground">
-                        {state.notice}
+                        {t('tools:carb_boundary_notice')}
                     </p>
                 )}
-                {state.error && (
+                {error && (
                     <p className="mt-2 flex items-center gap-1.5 text-xs text-red-500 dark:text-red-400">
                         <AlertCircle className="size-3.5 shrink-0" />
-                        {state.error}
+                        {error}
                     </p>
                 )}
             </CardContent>
 
             <CardFooter className="border-t border-border/40 px-4 py-2.5">
-                {state.can_approve || state.can_reject ? (
+                {status === 'pending' ? (
                     <div className="flex w-full gap-2">
                         <Button
                             size="sm"
                             className="flex-1 bg-linear-to-br from-emerald-500 to-emerald-600 text-white shadow-sm transition-all hover:from-emerald-600 hover:to-emerald-700 hover:shadow-md active:scale-[0.98]"
-                            disabled={action.processing || !state.can_approve}
-                            onClick={() => void act('approve')}
+                            disabled={action.processing}
+                            onClick={() => void submit('approved')}
                         >
                             {action.processing ? (
                                 <Loader2 className="size-4 animate-spin" />
@@ -186,15 +134,15 @@ export function ApprovalCard({
                             size="sm"
                             variant="outline"
                             className="flex-1 transition-all hover:bg-destructive/5 hover:text-destructive active:scale-[0.98]"
-                            disabled={action.processing || !state.can_reject}
-                            onClick={() => void act('reject')}
+                            disabled={action.processing}
+                            onClick={() => void submit('rejected')}
                         >
                             <X className="size-4" />
                             Dismiss
                         </Button>
                     </div>
                 ) : (
-                    <StatusFooter status={state.status} />
+                    <StatusFooter status={status} />
                 )}
             </CardFooter>
         </Card>
@@ -217,14 +165,12 @@ function StatusBadge({ status }: { status: ApprovalStatus }) {
 }
 
 function StatusFooter({ status }: { status: ApprovalStatus }) {
-    const { footerLabel, footerClassName, FooterIcon, footerSpin } =
+    const { footerLabel, footerClassName, FooterIcon } =
         STATUS_PRESENTATION[status];
 
     return (
         <p className={cn('flex items-center gap-1.5 text-xs', footerClassName)}>
-            <FooterIcon
-                className={cn('size-3.5', footerSpin && 'animate-spin')}
-            />
+            <FooterIcon className="size-3.5" />
             {footerLabel}
         </p>
     );

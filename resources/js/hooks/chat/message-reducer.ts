@@ -32,8 +32,7 @@ export type ChatAction =
     | { type: 'ADD_CITATION'; citation: UrlCitationPayload }
     | {
           type: 'ADD_APPROVAL';
-          approvalId: string;
-          card: ApprovalCardData;
+          approval: ApprovalCardData;
           ownerToolId?: string | null;
       }
     | { type: 'REASONING_START'; reasoningId: string; at: number }
@@ -222,13 +221,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             return {
                 ...state,
                 messages: updateLastAssistant(state.messages, (message) =>
-                    upsertDataPart(
+                    upsertDataPart<ApprovalCardData>(
                         message,
                         'data-approval',
-                        action.approvalId,
+                        action.approval.toolCallId,
                         () => ({
-                            approvalId: action.approvalId,
-                            card: action.card,
+                            ...action.approval,
                             ownerToolId: action.ownerToolId ?? null,
                         }),
                         (data) => data,

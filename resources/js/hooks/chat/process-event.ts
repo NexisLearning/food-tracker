@@ -1,4 +1,4 @@
-import { parseApprovalOutput } from '@/components/chat/approval-part';
+import { parseApprovalRequest } from '@/components/chat/approval-part';
 import type { ChatAction, UrlCitationPayload } from './message-reducer';
 
 export interface RawStreamEvent {
@@ -17,6 +17,7 @@ export interface RawStreamEvent {
     item_id?: string;
     tool_type?: string;
     status?: string;
+    approvals?: unknown[];
 }
 
 export interface StreamTracking {
@@ -138,21 +139,19 @@ export function applyStreamEvent(
             }
             break;
 
-        case 'tool_result': {
-            const approval = parseApprovalOutput(raw.result);
+        case 'tool_approval_request':
+            seenEventIds.add(raw.id);
 
-            if (approval) {
-                seenEventIds.add(raw.id);
-                dispatch({
-                    type: 'ADD_APPROVAL',
-                    approvalId: approval.approvalId,
-                    card: approval.card,
-                    ownerToolId:
-                        typeof raw.tool_id === 'string' ? raw.tool_id : null,
-                });
-                break;
+            for (const entry of raw.approvals ?? []) {
+                const approval = parseApprovalRequest(entry);
+
+                if (approval) {
+                    dispatch({ type: 'ADD_APPROVAL', approval });
+                }
             }
+            break;
 
+        case 'tool_result': {
             if (typeof raw.tool_id === 'string') {
                 seenEventIds.add(raw.id);
                 dispatch({
