@@ -34,4 +34,6 @@ return [
     'approval_awaiting' => 'Not saved yet — please confirm.',
     'approval_approved' => 'Saved.',
     'approval_rejected' => 'Dismissed — nothing was saved.',
+    'approval_recorded' => 'Recorded — waiting on the other entries.',
+    'approval_failed' => 'Could not be saved. Please try again.',
 ];

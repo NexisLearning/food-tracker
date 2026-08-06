@@ -17,6 +17,7 @@ export interface RawStreamEvent {
     item_id?: string;
     tool_type?: string;
     status?: string;
+    denied?: boolean;
     approvals?: unknown[];
 }
 
@@ -154,6 +155,11 @@ export function applyStreamEvent(
         case 'tool_result': {
             if (typeof raw.tool_id === 'string') {
                 seenEventIds.add(raw.id);
+                dispatch({
+                    type: 'RESOLVE_APPROVAL',
+                    toolCallId: raw.tool_id,
+                    status: raw.denied === true ? 'rejected' : 'approved',
+                });
                 dispatch({
                     type: 'UPDATE_TOOL_RESULT',
                     toolId: raw.tool_id,

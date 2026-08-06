@@ -34,4 +34,6 @@ return [
     'approval_awaiting' => 'Pas encore enregistré — merci de confirmer.',
     'approval_approved' => 'Enregistré.',
     'approval_rejected' => 'Ignoré — rien n\'a été enregistré.',
+    'approval_recorded' => 'Enregistré — en attente des autres entrées.',
+    'approval_failed' => "Impossible d'enregistrer. Veuillez réessayer.",
 ];

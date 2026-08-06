@@ -16,6 +16,10 @@ use Laravel\Ai\Messages\MessageRole;
 
 final readonly class CreatePendingChatStreamTurn
 {
+    public function __construct(
+        private AbandonPendingApprovals $abandonPendingApprovals,
+    ) {}
+
     /**
      * @param  list<array{type: string, name: ?string, base64: string, mime: ?string}>  $attachments
      */
@@ -33,6 +37,8 @@ final readonly class CreatePendingChatStreamTurn
             $now = now();
 
             $conversation = $this->lockConversation($conversation, $user);
+
+            $this->abandonPendingApprovals->handle($conversation->id);
 
             $conversation->messages()->create([
                 'id' => $userMessageId,

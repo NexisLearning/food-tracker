@@ -2,8 +2,11 @@
 
 declare(strict_types=1);
 
+use App\Actions\AbandonPendingApprovals;
 use App\Actions\BuildConversationMessagesAction;
 use App\Actions\CompletePendingChatStreamTurn;
+use App\Actions\CreatePendingChatStreamTurn;
+use App\Actions\RecordApprovalDecisions;
 use App\Actions\ResumeChatStream;
 use App\Ai\AgentRequest;
 use App\Ai\Agents\AgentRunner;
@@ -233,4 +236,92 @@ it('drops a pause from a turn that never finished, since it cannot be resumed', 
     expect($assistant->approval_state)->toBeNull()
         ->and($assistant->requestedApprovals())->toBe([])
         ->and($assistant->hasPendingApprovals())->toBeFalse();
+});
+
+it('abandons a pending approval once the conversation moves on', function (): void {
+    $user = User::factory()->create();
+    $conversation = pausedConversation($user);
+
+    resolve(CreatePendingChatStreamTurn::class)->handle(
+        $conversation,
+        $user,
+        'never mind, what should I eat instead?',
+        [],
+        'web',
+    );
+
+    expect($conversation->fresh()->pausedApprovalTurn())->toBeNull();
+
+    $card = collect(resolve(BuildConversationMessagesAction::class)->handle($conversation->fresh()))
+        ->flatMap(fn (array $message): array => $message['parts'])
+        ->firstWhere('type', 'data-approval');
+
+    expect($card['data']['status'])->toBe('abandoned');
+});
+
+it('refuses a decision on an approval the conversation has moved past', function (): void {
+    $user = User::factory()->create();
+    $conversation = pausedConversation($user);
+
+    resolve(AbandonPendingApprovals::class)->handle($conversation->id);
+
+    $this->actingAs($user)
+        ->postJson(route('approvals.decide', $conversation->id), [
+            'decisions' => ['call_abc' => ['action' => 'approve']],
+        ])
+        ->assertStatus(409);
+});
+
+it('waits for every pending call before resuming, rather than dismissing the rest', function (): void {
+    Queue::fake();
+
+    $user = User::factory()->create();
+    $conversation = Conversation::factory()->forUser($user)->create();
+
+    History::factory()
+        ->forConversation($conversation)
+        ->awaitingApproval(['call_abc' => 'Eggs', 'call_def' => 'Coffee'])
+        ->create([
+            'tool_calls' => [
+                ['id' => 'call_abc', 'name' => 'log_health_entry', 'arguments' => []],
+                ['id' => 'call_def', 'name' => 'log_health_entry', 'arguments' => []],
+            ],
+            'meta' => History::streamMeta('stream-1', History::STREAM_STATUS_COMPLETED, [
+                'approvals' => ['call_abc' => 'Eggs', 'call_def' => 'Coffee'],
+            ]),
+        ]);
+
+    $this->actingAs($user)
+        ->postJson(route('approvals.decide', $conversation->id), [
+            'decisions' => ['call_abc' => ['action' => 'approve']],
+        ])
+        ->assertAccepted()
+        ->assertJson(['status' => 'recorded', 'awaiting' => ['call_def']]);
+
+    Queue::assertNotPushed(ProcessChatStream::class);
+
+    $paused = $conversation->fresh()->pausedApprovalTurn();
+    expect(array_keys($paused->pendingApprovals()))->toBe(['call_abc', 'call_def'])
+        ->and(array_keys($paused->recordedApprovalDecisions()))->toBe(['call_abc']);
+
+    $this->actingAs($user)
+        ->postJson(route('approvals.decide', $conversation->id), [
+            'decisions' => ['call_def' => ['action' => 'reject']],
+        ])
+        ->assertAccepted();
+
+    Queue::assertPushed(ProcessChatStream::class, fn (ProcessChatStream $job): bool => collect($job->decisions)->pluck('action', 'id')->all() === ['call_abc' => 'approve', 'call_def' => 'reject']);
+});
+
+it('shows a card as submitted while it waits on a sibling decision', function (): void {
+    $user = User::factory()->create();
+    $conversation = pausedConversation($user);
+
+    resolve(RecordApprovalDecisions::class)->handle($conversation, ['call_abc' => ['action' => 'approve']]);
+
+    $card = collect(resolve(BuildConversationMessagesAction::class)->handle($conversation->fresh()))
+        ->flatMap(fn (array $message): array => $message['parts'])
+        ->firstWhere('type', 'data-approval');
+
+    expect($card['data']['status'])->toBe('submitted');
 });

@@ -65,11 +65,15 @@ function linkedChatFor(mixed $test, User $user, array $overrides = []): UserChat
         ], $overrides));
 }
 
-function sendCallback(mixed $test, string $action, int $approvalIndex = 0): TestResponse
+function sendCallback(mixed $test, string $action, string $toolCallId = 'call_abc'): TestResponse
 {
     return $test->postJson(
         route('telegraph.webhook', ['token' => $test->bot->token]),
-        TelegramWebhookPayloads::callbackQuery($action, $approvalIndex, (string) $test->telegraphChat->chat_id),
+        TelegramWebhookPayloads::callbackQuery(
+            $action,
+            mb_substr(sha1($toolCallId), 0, 12),
+            (string) $test->telegraphChat->chat_id,
+        ),
     );
 }
 
@@ -106,14 +110,21 @@ function telegramAdvisor(callable $handle, ?callable $resume = null): ProcessesA
     };
 }
 
-function pausedTurnFor(User $user, string $conversationId, string $reason = 'Glucose 140 mg/dL (fasting)'): Conversation
+function pausedTurnFor(User $user, string $conversationId, ?array $pending = null): Conversation
 {
+    $pending ??= ['call_abc' => 'Glucose 140 mg/dL (fasting)'];
+
     $conversation = Conversation::factory()->forUser($user)->create(['id' => $conversationId]);
 
     History::factory()
         ->forConversation($conversation)
-        ->awaitingApproval(['call_abc' => $reason])
-        ->create(['tool_calls' => [['id' => 'call_abc', 'name' => 'log_health_entry', 'arguments' => ['log_type' => 'glucose']]]]);
+        ->awaitingApproval($pending)
+        ->create([
+            'tool_calls' => collect($pending)
+                ->map(fn (string $reason, string $id): array => ['id' => $id, 'name' => 'log_health_entry', 'arguments' => ['log_type' => 'glucose']])
+                ->values()
+                ->all(),
+        ]);
 
     return $conversation;
 }
@@ -703,14 +714,54 @@ describe('approval callbacks', function (): void {
         Telegraph::assertSentData('answerCallbackQuery', ['text' => 'no longer available'], false);
     });
 
-    it('replies neutrally for an out-of-range approval index', function (): void {
+    it('refuses a card whose tool call is no longer the one awaiting a decision', function (): void {
         $user = User::factory()->create();
         linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
         pausedTurnFor($user, 'conv-x');
 
-        sendCallback($this, 'approve', 5);
+        sendCallback($this, 'approve', 'call_from_an_older_turn');
 
         Telegraph::assertSentData('answerCallbackQuery', ['text' => 'no longer available'], false);
+    });
+
+    it('records one decision and waits when the turn paused on several calls', function (): void {
+        $user = User::factory()->create();
+        linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
+        pausedTurnFor($user, 'conv-x', pending: ['call_abc' => 'Eggs', 'call_def' => 'Coffee']);
+
+        $resumed = false;
+        app()->instance(ProcessesAdvisorMessage::class, telegramAdvisor(
+            fn (): array => ['response' => '', 'conversation_id' => 'conv-x', 'pending_approvals' => []],
+            function () use (&$resumed): array {
+                $resumed = true;
+
+                return ['response' => 'done', 'conversation_id' => 'conv-x', 'pending_approvals' => []];
+            },
+        ));
+
+        sendCallback($this, 'approve', 'call_abc');
+
+        expect($resumed)->toBeFalse();
+        Telegraph::assertSentData('editMessageText', ['text' => 'Recorded'], false);
+
+        sendCallback($this, 'reject', 'call_def');
+
+        expect($resumed)->toBeTrue();
+    });
+
+    it('does not report a save when the resumed turn throws', function (): void {
+        $user = User::factory()->create();
+        linkedChatFor($this, $user, ['conversation_id' => 'conv-x']);
+        pausedTurnFor($user, 'conv-x');
+
+        app()->instance(ProcessesAdvisorMessage::class, telegramAdvisor(
+            fn (): array => ['response' => '', 'conversation_id' => 'conv-x', 'pending_approvals' => []],
+            fn () => throw new RuntimeException('provider exploded'),
+        ));
+
+        sendCallback($this, 'approve');
+
+        Telegraph::assertSentData('editMessageText', ['text' => 'Could not be saved'], false);
     });
 
     it('asks an unlinked user to link their account first', function (): void {

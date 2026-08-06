@@ -153,6 +153,7 @@ final readonly class StreamAggregator
                 'title' => $this->toolTitle($event->toolResult->name),
                 'result' => $event->toolResult->result,
                 'successful' => $event->successful,
+                'denied' => $event->toolResult->denied,
                 'error' => $event->error,
                 'timestamp' => $event->timestamp,
                 'tool_result' => [

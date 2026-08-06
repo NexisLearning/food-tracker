@@ -18,6 +18,7 @@ import { ToolCallSection } from '@/components/chat/tool-call-section';
 import { cn } from '@/lib/utils';
 import type {
     ApprovalCardData,
+    ApprovalDecisionsPayload,
     ChatStatus,
     ProviderToolData,
     ReasoningData,
@@ -34,7 +35,9 @@ interface ChatMessagesProps {
     messages: UIMessage[];
     status: ChatStatus;
     isSubmitting?: boolean;
-    conversationId: string;
+    onApprovalDecision?: (
+        decisions: ApprovalDecisionsPayload,
+    ) => Promise<'resumed' | 'recorded'>;
 }
 
 export function ChatErrorBanner({
@@ -296,11 +299,13 @@ function hasRenderableContent(message: UIMessage): boolean {
 function AssistantBubble({
     message,
     isStreaming,
-    conversationId,
+    onDecide,
 }: {
     message: UIMessage;
     isStreaming?: boolean;
-    conversationId: string;
+    onDecide?: (
+        decisions: ApprovalDecisionsPayload,
+    ) => Promise<'resumed' | 'recorded'>;
 }) {
     const {
         reasoning,
@@ -346,8 +351,8 @@ function AssistantBubble({
                     {approvals.map((approval) => (
                         <ApprovalCard
                             key={approval.toolCallId}
-                            conversationId={conversationId}
                             approval={approval}
+                            onDecide={onDecide}
                         />
                     ))}
                 </div>
@@ -359,11 +364,13 @@ function AssistantBubble({
 const MessageBubble = memo(function MessageBubble({
     message,
     isStreaming,
-    conversationId,
+    onDecide,
 }: {
     message: UIMessage;
     isStreaming?: boolean;
-    conversationId: string;
+    onDecide?: (
+        decisions: ApprovalDecisionsPayload,
+    ) => Promise<'resumed' | 'recorded'>;
 }) {
     return message.role === 'user' ? (
         <UserBubble message={message} />
@@ -371,7 +378,7 @@ const MessageBubble = memo(function MessageBubble({
         <AssistantBubble
             message={message}
             isStreaming={isStreaming}
-            conversationId={conversationId}
+            onDecide={onDecide}
         />
     );
 });
@@ -411,7 +418,7 @@ export default function ChatMessages({
     messages,
     status,
     isSubmitting,
-    conversationId,
+    onApprovalDecision,
 }: ChatMessagesProps) {
     if (messages.length === 0) {
         return <EmptyState />;
@@ -435,7 +442,7 @@ export default function ChatMessages({
                             index === lastIndex &&
                             message.role === 'assistant'
                         }
-                        conversationId={conversationId}
+                        onDecide={onApprovalDecision}
                     />
                 </ChatErrorBoundary>
             ))}

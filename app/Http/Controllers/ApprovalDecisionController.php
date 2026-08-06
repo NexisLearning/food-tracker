@@ -25,8 +25,8 @@ final readonly class ApprovalDecisionController
     ): JsonResponse {
         Gate::authorize('view', $conversation);
 
-        $turn = $this->resumeChatStream->handle($conversation, $this->user, $request->decisions());
+        $result = $this->resumeChatStream->handle($conversation, $this->user, $request->decisions());
 
-        return response()->json($turn->acceptedPayload($this->user->id, $conversation->id), 202);
+        return response()->json($result->payload($this->user->id, $conversation->id), 202);
     }
 }

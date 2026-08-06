@@ -5,15 +5,13 @@ declare(strict_types=1);
 namespace App\Actions;
 
 use App\Actions\Billing\EnforceAiUsageLimit;
-use App\Data\ChatStreamTurn;
+use App\Data\ApprovalDecisionResult;
 use App\Enums\ModelName;
 use App\Jobs\ProcessChatStream;
 use App\Models\Conversation;
 use App\Models\History;
 use App\Models\User;
 use App\Services\StreamEventStore;
-use Illuminate\Support\Collection;
-use Laravel\Ai\Approvals\PendingApproval;
 use Laravel\Ai\Exceptions\ApprovalMismatchException;
 
 final readonly class ResumeChatStream
@@ -22,6 +20,7 @@ final readonly class ResumeChatStream
         private EnforceAiUsageLimit $enforceAiUsageLimit,
         private StreamEventStore $events,
         private CreatePendingChatStreamTurn $pendingTurn,
+        private RecordApprovalDecisions $recordApprovalDecisions,
     ) {}
 
     /**
@@ -29,25 +28,16 @@ final readonly class ResumeChatStream
      *
      * @throws ApprovalMismatchException when the decisions do not match the conversation's paused turn
      */
-    public function handle(Conversation $conversation, User $user, array $decisions, string $channel = 'web', ?string $locale = null): ChatStreamTurn
+    public function handle(Conversation $conversation, User $user, array $decisions, string $channel = 'web', ?string $locale = null): ApprovalDecisionResult
     {
-        $paused = $conversation->pausedApprovalTurn();
-
-        if (! $paused instanceof History) {
-            throw new ApprovalMismatchException('This conversation has no tool call awaiting approval.', new Collection);
-        }
-
-        $unknown = array_diff(array_keys($decisions), array_keys($paused->pendingApprovals()));
-
-        if ($unknown !== []) {
-            throw new ApprovalMismatchException(
-                'The approval decisions do not match a paused conversation turn.',
-                $this->pendingApprovalsOn($paused),
-            );
-        }
-
-        $modelName = $this->modelFor($paused);
+        $modelName = $this->modelFor($this->recordApprovalDecisions->pausedTurnFor($conversation));
         $this->enforceAiUsageLimit->handle($user, $modelName);
+
+        $recorded = $this->recordApprovalDecisions->handle($conversation, $decisions);
+
+        if (! $recorded->complete()) {
+            return new ApprovalDecisionResult(turn: null, awaiting: $recorded->awaiting);
+        }
 
         $this->events->clear($conversation->id);
 
@@ -62,58 +52,16 @@ final readonly class ResumeChatStream
             userMessageId: null,
             assistantMessageId: $turn->assistantMessageId,
             locale: $locale,
-            decisions: $this->normalizeDecisions($decisions),
+            decisions: $recorded->toQueuePayload(),
         ));
 
-        return $turn;
+        return new ApprovalDecisionResult(turn: $turn, awaiting: []);
     }
 
-    /**
-     * @return Collection<int, PendingApproval>
-     */
-    private function pendingApprovalsOn(History $paused): Collection
+    private function modelFor(?History $paused): ModelName
     {
-        $tools = [];
-        $arguments = [];
-
-        foreach ($paused->tool_calls ?? [] as $toolCall) {
-            $tools[$toolCall['id']] = $toolCall['name'];
-            $arguments[$toolCall['id']] = $toolCall['arguments'] ?? [];
-        }
-
-        return (new Collection($paused->pendingApprovals()))
-            ->map(fn (?string $reason, string $toolCallId): PendingApproval => new PendingApproval(
-                id: $toolCallId,
-                tool: $tools[$toolCallId] ?? '',
-                arguments: $arguments[$toolCallId] ?? [],
-                reason: $reason,
-            ))
-            ->values();
-    }
-
-    private function modelFor(History $paused): ModelName
-    {
-        $model = $paused->chatStreamMeta()['model'] ?? null;
+        $model = $paused?->chatStreamMeta()['model'] ?? null;
 
         return (is_string($model) ? ModelName::tryFrom($model) : null) ?? ModelName::default();
-    }
-
-    /**
-     * @param  array<string, array{action: string, result?: string|null}>  $decisions
-     * @return list<array{id: string, action: string, result: string|null}>
-     */
-    private function normalizeDecisions(array $decisions): array
-    {
-        $normalized = [];
-
-        foreach ($decisions as $toolCallId => $decision) {
-            $normalized[] = [
-                'id' => (string) $toolCallId,
-                'action' => $decision['action'],
-                'result' => $decision['result'] ?? null,
-            ];
-        }
-
-        return $normalized;
     }
 }

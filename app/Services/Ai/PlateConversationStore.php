@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Ai;
 
+use App\Actions\AbandonPendingApprovals;
 use Illuminate\Support\Facades\Context;
 use Laravel\Ai\Prompts\AgentPrompt;
 use Laravel\Ai\Responses\AgentResponse;
@@ -23,6 +24,8 @@ final class PlateConversationStore extends DatabaseConversationStore
         if (self::appManaged()) {
             return '';
         }
+
+        resolve(AbandonPendingApprovals::class)->handle($conversationId);
 
         return parent::storeUserMessage($conversationId, $participantType, $participantId, $prompt);
     }

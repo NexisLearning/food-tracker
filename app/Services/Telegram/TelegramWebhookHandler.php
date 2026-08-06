@@ -7,6 +7,7 @@ namespace App\Services\Telegram;
 use App\Actions\Messaging\DispatchChatTurnAction;
 use App\Actions\Messaging\LinkChatPlatformByToken;
 use App\Actions\Messaging\ResolveLinkedChatPlatformLink;
+use App\Actions\RecordApprovalDecisions;
 use App\Contracts\DownloadsTelegramPhoto;
 use App\Contracts\ProcessesAdvisorMessage;
 use App\Enums\ChatPlatform;
@@ -20,9 +21,8 @@ use DefStudio\Telegraph\Handlers\WebhookHandler;
 use DefStudio\Telegraph\Keyboard\Button;
 use DefStudio\Telegraph\Keyboard\Keyboard;
 use Illuminate\Support\Stringable;
-use Laravel\Ai\Approvals\Decision;
-use Laravel\Ai\Approvals\Decisions;
 use Laravel\Ai\Approvals\PendingApproval;
+use Laravel\Ai\Exceptions\ApprovalMismatchException;
 use Laravel\Ai\Files\Base64Image;
 use Throwable;
 
@@ -35,6 +35,7 @@ final class TelegramWebhookHandler extends WebhookHandler
         private readonly LinkChatPlatformByToken $linkChatPlatformByToken,
         private readonly ResolveLinkedChatPlatformLink $resolveLinkedChatPlatformLink,
         private readonly DispatchChatTurnAction $dispatchChatTurn,
+        private readonly RecordApprovalDecisions $recordApprovalDecisions,
     ) {}
 
     public function start(): void
@@ -143,7 +144,7 @@ final class TelegramWebhookHandler extends WebhookHandler
     public function approve(): void
     {
         $this->handleApprovalCallback(
-            fn (string $toolCallId): Decisions => Decisions::from([$toolCallId => Decision::approve()]),
+            ['action' => 'approve'],
             (string) __('tools.approval_approved'),
         );
     }
@@ -151,9 +152,7 @@ final class TelegramWebhookHandler extends WebhookHandler
     public function reject(): void
     {
         $this->handleApprovalCallback(
-            fn (string $toolCallId): Decisions => Decisions::from([
-                $toolCallId => Decision::reject((string) __('tools.approval_not_confirmed')),
-            ]),
+            ['action' => 'reject', 'result' => (string) __('tools.approval_not_confirmed')],
             (string) __('tools.approval_rejected'),
         );
     }
@@ -192,6 +191,11 @@ final class TelegramWebhookHandler extends WebhookHandler
         }
     }
 
+    private static function approvalToken(string $toolCallId): string
+    {
+        return mb_substr(sha1($toolCallId), 0, 12);
+    }
+
     /**
      * @param  array{response: string, conversation_id: string, pending_approvals: list<PendingApproval>}  $result
      */
@@ -201,26 +205,26 @@ final class TelegramWebhookHandler extends WebhookHandler
             $this->telegramMessage->sendLongMessage($this->chat, $result['response'], true);
         }
 
-        foreach ($result['pending_approvals'] as $index => $approval) {
-            $this->sendApprovalCard($approval, $index);
+        foreach ($result['pending_approvals'] as $approval) {
+            $this->sendApprovalCard($approval);
         }
     }
 
-    private function sendApprovalCard(PendingApproval $approval, int $index): void
+    private function sendApprovalCard(PendingApproval $approval): void
     {
         $this->chat
             ->html($this->approvalCardHtml($approval->reason, (string) __('tools.approval_awaiting')))
             ->keyboard(Keyboard::make()->row([
-                Button::make('✅ Approve')->action('approve')->param('i', (string) $index),
-                Button::make('❌ Reject')->action('reject')->param('i', (string) $index),
+                Button::make('✅ Approve')->action('approve')->param('c', self::approvalToken($approval->id)),
+                Button::make('❌ Reject')->action('reject')->param('c', self::approvalToken($approval->id)),
             ]))
             ->dispatch();
     }
 
     /**
-     * @param  callable(string): Decisions  $decide
+     * @param  array{action: string, result?: string|null}  $decision
      */
-    private function handleApprovalCallback(callable $decide, string $status): void
+    private function handleApprovalCallback(array $decision, string $status): void
     {
         $linkedChat = $this->resolveLinkedChat();
 
@@ -231,10 +235,10 @@ final class TelegramWebhookHandler extends WebhookHandler
         }
 
         $pending = $this->pendingApprovalsFor($linkedChat);
-        $index = $this->data->get('i');
-        $toolCallId = is_numeric($index)
-            ? (array_keys($pending)[(int) $index] ?? null)
-            : null;
+        $token = $this->data->get('c');
+
+        $toolCallId = collect(array_keys($pending))
+            ->first(fn (string $id): bool => is_string($token) && self::approvalToken($id) === $token);
 
         if ($toolCallId === null) {
             $this->reply('This request is no longer available.');
@@ -242,15 +246,53 @@ final class TelegramWebhookHandler extends WebhookHandler
             return;
         }
 
-        $this->reply($status);
-        $this->editApprovalCard($pending[$toolCallId], $status);
+        $conversation = $this->conversationFor($linkedChat);
+
+        if (! $conversation instanceof Conversation) {
+            $this->reply('This request is no longer available.'); // @codeCoverageIgnore
+
+            return; // @codeCoverageIgnore
+        }
 
         try {
-            $this->sendTurnResult($this->dispatchChatTurn->resume($linkedChat, $decide($toolCallId)));
+            $recorded = $this->recordApprovalDecisions->handle($conversation, [$toolCallId => $decision]);
+        } catch (ApprovalMismatchException) {
+            $this->reply('This request is no longer available.');
+
+            return;
+        }
+
+        if (! $recorded->complete()) {
+            $waiting = (string) __('tools.approval_recorded');
+
+            $this->reply($waiting);
+            $this->editApprovalCard($pending[$toolCallId], $waiting);
+
+            return;
+        }
+
+        try {
+            $result = $this->dispatchChatTurn->resume($linkedChat, $recorded->toDecisions());
         } catch (Throwable $e) {
             report($e);
-            $this->chat->message('❌ Error processing your decision. Please try again.')->send();
+
+            $failed = (string) __('tools.approval_failed');
+            $this->reply($failed);
+            $this->editApprovalCard($pending[$toolCallId], $failed);
+
+            return;
         }
+
+        $this->reply($status);
+        $this->editApprovalCard($pending[$toolCallId], $status);
+        $this->sendTurnResult($result);
+    }
+
+    private function conversationFor(UserChatPlatformLink $link): ?Conversation
+    {
+        return $link->conversation_id === null
+            ? null
+            : Conversation::query()->find($link->conversation_id);
     }
 
     /**
@@ -258,11 +300,7 @@ final class TelegramWebhookHandler extends WebhookHandler
      */
     private function pendingApprovalsFor(UserChatPlatformLink $link): array
     {
-        $conversation = $link->conversation_id === null
-            ? null
-            : Conversation::query()->find($link->conversation_id);
-
-        return $conversation?->pausedApprovalTurn()?->pendingApprovals() ?? [];
+        return $this->conversationFor($link)?->pausedApprovalTurn()?->pendingApprovals() ?? [];
     }
 
     private function editApprovalCard(?string $summary, string $status): void

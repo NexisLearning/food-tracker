@@ -1,20 +1,20 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import { decide } from '@/routes/approvals';
-import type { ApprovalCardData, ApprovalStatus } from '@/types/chat';
-import { useHttp } from '@inertiajs/react';
+import type {
+    ApprovalCardData,
+    ApprovalDecisionsPayload,
+    ApprovalStatus,
+} from '@/types/chat';
 import { AlertCircle, Check, Clock, Loader2, X } from 'lucide-react';
 import { type ComponentType, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface ApprovalCardProps {
-    conversationId: string;
     approval: ApprovalCardData;
-}
-
-interface ApprovalDecisionsForm {
-    decisions: Record<string, { action: 'approve' | 'reject' }>;
+    onDecide?: (
+        decisions: ApprovalDecisionsPayload,
+    ) => Promise<'resumed' | 'recorded'>;
 }
 
 interface StatusPresentation {
@@ -23,6 +23,7 @@ interface StatusPresentation {
     footerLabel: string;
     footerClassName: string;
     FooterIcon: ComponentType<{ className?: string }>;
+    footerSpin?: boolean;
 }
 
 const STATUS_PRESENTATION: Record<ApprovalStatus, StatusPresentation> = {
@@ -33,8 +34,17 @@ const STATUS_PRESENTATION: Record<ApprovalStatus, StatusPresentation> = {
         footerClassName: 'text-muted-foreground',
         FooterIcon: Clock,
     },
+    submitted: {
+        badgeLabel: 'Submitted',
+        badgeClassName:
+            'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+        footerLabel: 'Waiting on the other entries.',
+        footerClassName: 'text-amber-600 dark:text-amber-400',
+        FooterIcon: Loader2,
+        footerSpin: true,
+    },
     approved: {
-        badgeLabel: 'Approved',
+        badgeLabel: 'Saved',
         badgeClassName:
             'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
         footerLabel: 'Saved successfully.',
@@ -48,6 +58,13 @@ const STATUS_PRESENTATION: Record<ApprovalStatus, StatusPresentation> = {
         footerClassName: 'text-muted-foreground',
         FooterIcon: X,
     },
+    abandoned: {
+        badgeLabel: 'Not confirmed',
+        badgeClassName: 'bg-muted text-muted-foreground',
+        footerLabel: 'The conversation moved on, so nothing was saved.',
+        footerClassName: 'text-muted-foreground',
+        FooterIcon: Clock,
+    },
 };
 
 function summaryOf(approval: ApprovalCardData): string {
@@ -60,35 +77,37 @@ function summaryOf(approval: ApprovalCardData): string {
     return typeof summary === 'string' ? summary : approval.tool;
 }
 
-export function ApprovalCard({ conversationId, approval }: ApprovalCardProps) {
+export function ApprovalCard({ approval, onDecide }: ApprovalCardProps) {
     const { t } = useTranslation();
-    const action = useHttp<ApprovalDecisionsForm, unknown>({ decisions: {} });
-    const [status, setStatus] = useState<ApprovalStatus>(approval.status);
+    const [processing, setProcessing] = useState(false);
+    const [submitted, setSubmitted] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const isFoodEntry = approval.arguments.log_type === 'food';
+    // A decision only queues a turn, so the card stays non-committal until the
+    // resumed turn reports the tool's result — or a reload reads it back.
+    const status: ApprovalStatus =
+        approval.status === 'pending' && submitted
+            ? 'submitted'
+            : approval.status;
 
-    async function submit(intent: ApprovalStatus) {
-        if (action.processing || status !== 'pending') {
+    const isFoodEntry = approval.arguments.log_type === 'food';
+    const canDecide = approval.status === 'pending' && !submitted && !!onDecide;
+
+    async function submit(intent: 'approve' | 'reject') {
+        if (!onDecide || processing) {
             return;
         }
 
+        setProcessing(true);
         setError(null);
 
-        action.transform(() => ({
-            decisions: {
-                [approval.toolCallId]: {
-                    action: intent === 'approved' ? 'approve' : 'reject',
-                },
-            },
-        }));
-
         try {
-            await action.post(decide.url({ conversation: conversationId }));
-
-            setStatus(intent);
+            await onDecide({ [approval.toolCallId]: { action: intent } });
+            setSubmitted(true);
         } catch {
             setError('Something went wrong. Please try again.');
+        } finally {
+            setProcessing(false);
         }
     }
 
@@ -115,15 +134,15 @@ export function ApprovalCard({ conversationId, approval }: ApprovalCardProps) {
             </CardContent>
 
             <CardFooter className="border-t border-border/40 px-4 py-2.5">
-                {status === 'pending' ? (
+                {canDecide ? (
                     <div className="flex w-full gap-2">
                         <Button
                             size="sm"
                             className="flex-1 bg-linear-to-br from-emerald-500 to-emerald-600 text-white shadow-sm transition-all hover:from-emerald-600 hover:to-emerald-700 hover:shadow-md active:scale-[0.98]"
-                            disabled={action.processing}
-                            onClick={() => void submit('approved')}
+                            disabled={processing}
+                            onClick={() => void submit('approve')}
                         >
-                            {action.processing ? (
+                            {processing ? (
                                 <Loader2 className="size-4 animate-spin" />
                             ) : (
                                 <Check className="size-4" />
@@ -134,8 +153,8 @@ export function ApprovalCard({ conversationId, approval }: ApprovalCardProps) {
                             size="sm"
                             variant="outline"
                             className="flex-1 transition-all hover:bg-destructive/5 hover:text-destructive active:scale-[0.98]"
-                            disabled={action.processing}
-                            onClick={() => void submit('rejected')}
+                            disabled={processing}
+                            onClick={() => void submit('reject')}
                         >
                             <X className="size-4" />
                             Dismiss
@@ -165,12 +184,14 @@ function StatusBadge({ status }: { status: ApprovalStatus }) {
 }
 
 function StatusFooter({ status }: { status: ApprovalStatus }) {
-    const { footerLabel, footerClassName, FooterIcon } =
+    const { footerLabel, footerClassName, FooterIcon, footerSpin } =
         STATUS_PRESENTATION[status];
 
     return (
         <p className={cn('flex items-center gap-1.5 text-xs', footerClassName)}>
-            <FooterIcon className="size-3.5" />
+            <FooterIcon
+                className={cn('size-3.5', footerSpin && 'animate-spin')}
+            />
             {footerLabel}
         </p>
     );

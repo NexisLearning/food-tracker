@@ -217,8 +217,7 @@ final class ProcessChatStream implements ShouldQueue
                     ? Decision::approve()
                     : Decision::reject($decision['result'] ?? null),
             ])
-            ->all())
-            ->rejectRemaining(__('tools.approval_not_confirmed'));
+            ->all());
     }
 
     /**

@@ -100,6 +100,41 @@ final class History extends Model
     }
 
     /**
+     * @return array<string, array{action: string, result?: string|null}>
+     */
+    public function recordedApprovalDecisions(): array
+    {
+        $decisions = $this->chatStreamMeta()['approval_decisions'] ?? [];
+
+        if (! is_array($decisions)) {
+            return [];
+        }
+
+        $recorded = [];
+
+        foreach ($decisions as $toolCallId => $decision) {
+            if (! is_array($decision)) {
+                continue;
+            }
+
+            $action = $decision['action'] ?? null;
+
+            if (! is_string($action)) {
+                continue;
+            }
+
+            $result = $decision['result'] ?? null;
+
+            $recorded[(string) $toolCallId] = [
+                'action' => $action,
+                'result' => is_string($result) ? $result : null,
+            ];
+        }
+
+        return $recorded;
+    }
+
+    /**
      * @return array<string, string|null>
      */
     public function requestedApprovals(): array

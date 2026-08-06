@@ -6,6 +6,7 @@ namespace App\Actions;
 
 use App\Models\Conversation;
 use App\Models\History;
+use Illuminate\Support\Collection;
 use Laravel\Ai\Messages\MessageRole;
 
 final readonly class BuildConversationMessagesAction
@@ -70,13 +71,11 @@ final readonly class BuildConversationMessagesAction
         }
 
         $pending = $message->pendingApprovals();
+        $recorded = $message->recordedApprovalDecisions();
 
         $toolCalls = collect($message->tool_calls ?? [])->keyBy('id');
 
-        $denied = collect($message->tool_results ?? [])
-            ->filter(fn (array $toolResult): bool => $toolResult['denied'] ?? false)
-            ->pluck('id')
-            ->all();
+        $results = collect($message->tool_results ?? [])->keyBy('id');
 
         $parts = [];
 
@@ -91,15 +90,31 @@ final readonly class BuildConversationMessagesAction
                     'tool' => $toolCall['name'] ?? '',
                     'reason' => $reason,
                     'arguments' => $toolCall['arguments'] ?? [],
-                    'status' => match (true) {
-                        array_key_exists($toolCallId, $pending) => 'pending',
-                        in_array($toolCallId, $denied, true) => 'rejected',
-                        default => 'approved',
-                    },
+                    'status' => $this->statusFor($toolCallId, $pending, $recorded, $results),
                 ],
             ];
         }
 
         return $parts;
+    }
+
+    /**
+     * @param  array<string, string|null>  $pending
+     * @param  array<string, array{action: string, result?: string|null}>  $recorded
+     * @param  Collection<int|string, array{id: string, name: string, arguments?: array<string, mixed>|null, result?: mixed, result_id?: string|null, denied?: bool}>  $results
+     */
+    private function statusFor(string $toolCallId, array $pending, array $recorded, Collection $results): string
+    {
+        if (array_key_exists($toolCallId, $pending)) {
+            return array_key_exists($toolCallId, $recorded) ? 'submitted' : 'pending';
+        }
+
+        $result = $results->get($toolCallId);
+
+        return match (true) {
+            $result === null => 'abandoned',
+            ($result['denied'] ?? false) === true => 'rejected',
+            default => 'approved',
+        };
     }
 }

@@ -15,7 +15,13 @@ export interface ChatPageProps {
     [key: string]: unknown;
 }
 
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
+export type ApprovalStatus =
+    'pending' | 'submitted' | 'approved' | 'rejected' | 'abandoned';
+
+export type ApprovalDecisionsPayload = Record<
+    string,
+    { action: 'approve' | 'reject'; result?: string }
+>;
 
 export interface ApprovalCardData {
     toolCallId: string;
