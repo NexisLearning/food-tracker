@@ -101,3 +101,15 @@ Route::prefix('v2/account')
             ->middleware('throttle:30,1')
             ->name('api.v2.account.consent');
     });
+
+Route::prefix('v2/snap-to-track')
+    ->middleware('auth:sanctum')
+    ->group(function (): void {
+        Route::post('analyze', ApiV2\SnapToTrack\AnalyzeSnapToTrackPhotoController::class)
+            ->middleware('throttle:snap-to-track-analyze')
+            ->name('api.v2.snap-to-track.analyze');
+
+        Route::post('drafts/{draft}/meal', ApiV2\SnapToTrack\StoreSnapToTrackMealController::class)
+            ->middleware('throttle:60,1')
+            ->name('api.v2.snap-to-track.meal');
+    });
